@@ -1,4 +1,4 @@
-# High‑Performance Depth Processing for Intel RealSense (Robotics)
+# High‑Performance Depth Processing for Intel RealSense
 
 Final project for the “High‑Performance Python” course.
 
@@ -139,8 +139,7 @@ Processed data can be used for:
 - 3D scene reconstruction
 
 ## Author
-
-[Your Name]
+Sergey Gumirov, Artem Erkhov, Danil Belov
 
 ## License
 
