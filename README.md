@@ -2,9 +2,7 @@
 
 Final project for the “High‑Performance Python” course.
 
-  ![Depth](assets/realsense_depth.png)
-  ![Color](assets/realsense_color.png)
-  ![Normals](assets/realsense_normals_numba.png)
+  ![example](assets/side_by_side.png)
 
 ## Project overview
 
