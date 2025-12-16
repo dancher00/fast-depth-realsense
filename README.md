@@ -2,6 +2,10 @@
 
 Final project for the “High‑Performance Python” course.
 
+  ![Depth](assets/realsense_depth.png)
+  ![Color](assets/realsense_color.png)
+  ![Normals](assets/realsense_normals_numba.png)
+
 ## Project overview
 
 This project demonstrates how to optimize depth processing from an Intel RealSense camera for robotics‑style workloads. Core tasks:
