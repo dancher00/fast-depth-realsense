@@ -1,5 +1,5 @@
 """
-GPU-accelerated version using CuPy.
+GPU-ускоренная версия с CuPy
 """
 import numpy as np
 import cupy as cp
@@ -9,53 +9,81 @@ import time
 
 
 def compute_normals_gpu(depth_image, fx, fy, cx, cy):
-    """Compute surface normals on GPU with CuPy."""
-    # Move data to GPU
+    """Вычисление нормалей на GPU с CuPy через 3D точки"""
+    # Перемещаем данные на GPU
     depth_gpu = cp.asarray(depth_image, dtype=cp.float32)
-    z = depth_gpu / 1000.0  # mm to meters
+    z = depth_gpu / 1000.0  # мм в метры
     
     height, width = depth_image.shape
     normals = cp.zeros((height, width, 3), dtype=cp.float32)
     
-    # Vectorized gradients using padded borders
-    z_padded = cp.pad(z, ((1, 1), (1, 1)), mode='constant', constant_values=0)
+    # Создаем сетку координат
+    u = cp.arange(width, dtype=cp.float32)
+    v = cp.arange(height, dtype=cp.float32)
+    u_grid, v_grid = cp.meshgrid(u, v)
     
-    # Central differences
-    dz_dx = (z_padded[1:-1, 2:] - z_padded[1:-1, :-2]) / (2.0 * fx)
-    dz_dy = (z_padded[2:, 1:-1] - z_padded[:-2, 1:-1]) / (2.0 * fy)
+    # Преобразуем в 3D координаты
+    x_3d = (u_grid - cx) * z / fx
+    y_3d = (v_grid - cy) * z / fy
+    z_3d = z
     
-    # Valid mask
+    # Создаем срезы для соседних точек
+    # Центральные точки (без границ)
     z_center = z[1:-1, 1:-1]
-    valid_mask = z_center > 0
+    x_center = x_3d[1:-1, 1:-1]
+    y_center = y_3d[1:-1, 1:-1]
     
-    # Normals — crop to match (H-2, W-2)
-    dz_dx_center = dz_dx[1:-1, 1:-1]
-    dz_dy_center = dz_dy[1:-1, 1:-1]
-    normal_x_center = -dz_dx_center
-    normal_y_center = -dz_dy_center
-    normal_z_center = cp.ones_like(dz_dx_center)
+    # Соседние точки (справа и снизу)
+    z_right = z[1:-1, 2:]
+    x_right = x_3d[1:-1, 2:]
+    y_right = y_3d[1:-1, 2:]
     
-    # Normalize
-    norm_center = cp.sqrt(normal_x_center**2 + normal_y_center**2 + normal_z_center**2)
-    norm_mask_center = norm_center > 0
+    z_down = z[2:, 1:-1]
+    x_down = x_3d[2:, 1:-1]
+    y_down = y_3d[2:, 1:-1]
     
-    # Combined mask
-    final_mask = valid_mask & norm_mask_center
+    # Векторы от центра к соседям
+    vec_right_x = x_right - x_center
+    vec_right_y = y_right - y_center
+    vec_right_z = z_right - z_center
     
-    normals[1:-1, 1:-1, 0] = cp.where(final_mask, normal_x_center / norm_center, 0)
-    normals[1:-1, 1:-1, 1] = cp.where(final_mask, normal_y_center / norm_center, 0)
-    normals[1:-1, 1:-1, 2] = cp.where(final_mask, normal_z_center / norm_center, 0)
+    vec_down_x = x_down - x_center
+    vec_down_y = y_down - y_center
+    vec_down_z = z_down - z_center
+    
+    # Cross product: normal = vec_right × vec_down
+    normal_x = vec_right_y * vec_down_z - vec_right_z * vec_down_y
+    normal_y = vec_right_z * vec_down_x - vec_right_x * vec_down_z
+    normal_z = vec_right_x * vec_down_y - vec_right_y * vec_down_x
+    
+    # Нормализация
+    norm = cp.sqrt(normal_x**2 + normal_y**2 + normal_z**2)
+    
+    # Маска валидных точек
+    valid_mask = (z_center > 0) & (z_right > 0) & (z_down > 0) & (norm > 1e-6)
+    
+    # Нормализуем и ориентируем к камере
+    normals[1:-1, 1:-1, 0] = cp.where(valid_mask, normal_x / norm, 0)
+    normals[1:-1, 1:-1, 1] = cp.where(valid_mask, normal_y / norm, 0)
+    normals[1:-1, 1:-1, 2] = cp.where(valid_mask, normal_z / norm, 0)
+    
+    # Ориентируем нормали к камере (Z должна быть положительной)
+    flip_mask = (valid_mask) & (normals[1:-1, 1:-1, 2] < 0)
+    normals[1:-1, 1:-1, 0] = cp.where(flip_mask, -normals[1:-1, 1:-1, 0], normals[1:-1, 1:-1, 0])
+    normals[1:-1, 1:-1, 1] = cp.where(flip_mask, -normals[1:-1, 1:-1, 1], normals[1:-1, 1:-1, 1])
+    normals[1:-1, 1:-1, 2] = cp.where(flip_mask, -normals[1:-1, 1:-1, 2], normals[1:-1, 1:-1, 2])
     
     return cp.asnumpy(normals)
 
 
 def filter_depth_median_gpu(depth_image, kernel_size=5):
-    """Median filter (CPU SciPy here; can be ported to GPU later)."""
+    """Медианная фильтрация (используем CPU scipy, но можно и GPU версию)"""
+    # Для простоты используем scipy, но можно реализовать на GPU
     return ndimage.median_filter(depth_image, size=kernel_size)
 
 
 def compute_statistics_gpu(depth_image):
-    """Compute statistics on GPU."""
+    """Вычисление статистики на GPU"""
     depth_gpu = cp.asarray(depth_image)
     valid_depth = depth_gpu[depth_gpu > 0]
     
@@ -72,26 +100,26 @@ def compute_statistics_gpu(depth_image):
 
 
 def process_frame_gpu(depth_image, intrinsics):
-    """Full frame processing — GPU version."""
+    """Полная обработка кадра - GPU версия"""
     fx = intrinsics.fx
     fy = intrinsics.fy
     cx = intrinsics.ppx
     cy = intrinsics.ppy
     
-    # Filtering
+    # Фильтрация
     filtered_depth = filter_depth_median_gpu(depth_image)
     
-    # GPU normals
+    # Вычисление нормалей на GPU
     normals = compute_normals_gpu(filtered_depth, fx, fy, cx, cy)
     
-    # GPU statistics
+    # Статистика на GPU
     stats = compute_statistics_gpu(filtered_depth)
     
     return filtered_depth, normals, stats
 
 
 def capture_and_process_gpu(pipeline, num_frames=100):
-    """Capture and process frames — GPU version."""
+    """Захват и обработка кадров - GPU версия"""
     times = []
     
     for i in range(num_frames):
@@ -118,11 +146,11 @@ def capture_and_process_gpu(pipeline, num_frames=100):
 
 if __name__ == "__main__":
     try:
-        # Check GPU availability
+        # Проверка доступности GPU
         cp.cuda.Device(0).use()
-        print(f"Using GPU: {cp.cuda.runtime.getDeviceProperties(0)['name']}")
+        print(f"Используется GPU: {cp.cuda.runtime.getDeviceProperties(0)['name']}")
     except:
-        print("GPU is unavailable, use the CPU version")
+        print("GPU недоступен, используйте CPU версию")
         exit(1)
     
     pipeline = rs.pipeline()
@@ -132,10 +160,10 @@ if __name__ == "__main__":
     pipeline.start(config)
     
     try:
-        print("Capturing and processing frames (GPU version)...")
+        print("Захват и обработка кадров (GPU версия)...")
         times = capture_and_process_gpu(pipeline, num_frames=50)
         
-        print(f"\nAverage processing time: {np.mean(times)*1000:.2f} ms")
+        print(f"\nСреднее время обработки: {np.mean(times)*1000:.2f} ms")
         print(f"FPS: {1.0/np.mean(times):.2f}")
         
     finally:
