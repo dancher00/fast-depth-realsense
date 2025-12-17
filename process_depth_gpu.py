@@ -4,14 +4,22 @@ GPU-ускоренная версия с CuPy
 import numpy as np
 import cupy as cp
 import pyrealsense2 as rs
-from scipy import ndimage
 import time
 
 
-def compute_normals_gpu(depth_image, fx, fy, cx, cy):
-    """Вычисление нормалей на GPU с CuPy через 3D точки"""
-    # Перемещаем данные на GPU
-    depth_gpu = cp.asarray(depth_image, dtype=cp.float32)
+def compute_normals_gpu(depth_image, fx, fy, cx, cy, return_gpu=False):
+    """Вычисление нормалей на GPU с CuPy через 3D точки
+    
+    Args:
+        depth_image: входное изображение (numpy array или CuPy array)
+        fx, fy, cx, cy: параметры камеры
+        return_gpu: если True, возвращает CuPy array (остается на GPU)
+    """
+    # Перемещаем данные на GPU, если еще не на GPU
+    if isinstance(depth_image, cp.ndarray):
+        depth_gpu = depth_image
+    else:
+        depth_gpu = cp.asarray(depth_image, dtype=cp.float32)
     z = depth_gpu / 1000.0  # мм в метры
     
     height, width = depth_image.shape
@@ -73,18 +81,68 @@ def compute_normals_gpu(depth_image, fx, fy, cx, cy):
     normals[1:-1, 1:-1, 1] = cp.where(flip_mask, -normals[1:-1, 1:-1, 1], normals[1:-1, 1:-1, 1])
     normals[1:-1, 1:-1, 2] = cp.where(flip_mask, -normals[1:-1, 1:-1, 2], normals[1:-1, 1:-1, 2])
     
-    return cp.asnumpy(normals)
+    if return_gpu:
+        return normals
+    else:
+        return cp.asnumpy(normals)
 
 
-def filter_depth_median_gpu(depth_image, kernel_size=5):
-    """Медианная фильтрация (используем CPU scipy, но можно и GPU версию)"""
-    # Для простоты используем scipy, но можно реализовать на GPU
-    return ndimage.median_filter(depth_image, size=kernel_size)
+def filter_depth_median_gpu(depth_image, kernel_size=5, return_gpu=False):
+    """Медианная фильтрация на GPU с использованием CuPy
+    
+    Args:
+        depth_image: входное изображение (numpy array или CuPy array)
+        kernel_size: размер ядра фильтра
+        return_gpu: если True, возвращает CuPy array (остается на GPU)
+    """
+    # Перемещаем данные на GPU, если еще не на GPU
+    if isinstance(depth_image, cp.ndarray):
+        depth_gpu = depth_image
+    else:
+        depth_gpu = cp.asarray(depth_image, dtype=cp.float32)
+    
+    # Используем cupyx.scipy.ndimage если доступен (оптимальный вариант)
+    try:
+        from cupyx.scipy import ndimage as cupy_ndimage
+        filtered_gpu = cupy_ndimage.median_filter(depth_gpu, size=kernel_size)
+    except (ImportError, AttributeError):
+        # Fallback: векторизованная реализация медианной фильтрации на GPU
+        # Используем подход с созданием всех окон через индексацию
+        height, width = depth_gpu.shape
+        pad = kernel_size // 2
+        
+        # Добавляем padding
+        padded = cp.pad(depth_gpu, pad, mode='edge')
+        
+        # Создаем индексы для всех окон векторизованно
+        # Используем broadcasting для создания всех окон одновременно
+        y_indices = cp.arange(height)[:, None, None] + cp.arange(kernel_size)[None, :, None]
+        x_indices = cp.arange(width)[None, None, :] + cp.arange(kernel_size)[None, None, :]
+        
+        # Извлекаем все окна одновременно
+        windows = padded[y_indices, x_indices]  # shape: (height, kernel_size, width, kernel_size)
+        
+        # Переформатируем для удобства: (height, width, kernel_size*kernel_size)
+        windows = windows.transpose(0, 2, 1, 3).reshape(height, width, -1)
+        
+        # Сортируем каждое окно и берем медиану
+        windows_sorted = cp.sort(windows, axis=2)
+        median_idx = kernel_size * kernel_size // 2
+        filtered_gpu = windows_sorted[:, :, median_idx]
+    
+    if return_gpu:
+        return filtered_gpu
+    else:
+        return cp.asnumpy(filtered_gpu)
 
 
 def compute_statistics_gpu(depth_image):
     """Вычисление статистики на GPU"""
-    depth_gpu = cp.asarray(depth_image)
+    # Если данные уже на GPU, используем их напрямую
+    if isinstance(depth_image, cp.ndarray):
+        depth_gpu = depth_image
+    else:
+        depth_gpu = cp.asarray(depth_image)
     valid_depth = depth_gpu[depth_gpu > 0]
     
     if len(valid_depth) == 0:
@@ -100,26 +158,50 @@ def compute_statistics_gpu(depth_image):
 
 
 def process_frame_gpu(depth_image, intrinsics):
-    """Полная обработка кадра - GPU версия"""
+    """Полная обработка кадра - GPU версия (вся обработка на GPU)"""
     fx = intrinsics.fx
     fy = intrinsics.fy
     cx = intrinsics.ppx
     cy = intrinsics.ppy
     
-    # Фильтрация
-    filtered_depth = filter_depth_median_gpu(depth_image)
+    # Перемещаем данные на GPU один раз в начале
+    depth_gpu = cp.asarray(depth_image, dtype=cp.float32)
     
-    # Вычисление нормалей на GPU
-    normals = compute_normals_gpu(filtered_depth, fx, fy, cx, cy)
+    # Фильтрация на GPU (возвращаем GPU array)
+    filtered_depth_gpu = filter_depth_median_gpu(depth_gpu, return_gpu=True)
     
-    # Статистика на GPU
-    stats = compute_statistics_gpu(filtered_depth)
+    # Вычисление нормалей на GPU (используем GPU array, возвращаем GPU array)
+    normals_gpu = compute_normals_gpu(filtered_depth_gpu, fx, fy, cx, cy, return_gpu=True)
+    
+    # Статистика на GPU (используем GPU array)
+    stats = compute_statistics_gpu(filtered_depth_gpu)
+    
+    # Возвращаем результаты (конвертируем в numpy только в конце)
+    filtered_depth = cp.asnumpy(filtered_depth_gpu)
+    normals = cp.asnumpy(normals_gpu)
     
     return filtered_depth, normals, stats
 
 
+def warmup_gpu(pipeline):
+    """Прогрев GPU перед основными измерениями (инициализация CUDA, компиляция ядер)"""
+    print("Warmup: инициализация GPU...")
+    frames = pipeline.wait_for_frames()
+    depth_frame = frames.get_depth_frame()
+    
+    if depth_frame:
+        depth_image = np.asanyarray(depth_frame.get_data())
+        intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+        # Выполняем обработку для прогрева GPU (компиляция CUDA ядер)
+        _ = process_frame_gpu(depth_image, intrinsics)
+    print("Warmup завершен.")
+
+
 def capture_and_process_gpu(pipeline, num_frames=100):
     """Захват и обработка кадров - GPU версия"""
+    # Прогрев GPU
+    warmup_gpu(pipeline)
+    
     times = []
     
     for i in range(num_frames):
@@ -136,9 +218,14 @@ def capture_and_process_gpu(pipeline, num_frames=100):
         filtered_depth, normals, stats = process_frame_gpu(depth_image, intrinsics)
         elapsed = time.time() - start
         
+        # Пропускаем первый кадр (может быть медленнее из-за инициализации GPU)
+        if i == 0:
+            print(f"Frame {i} (warmup, не учитывается в статистике): {elapsed*1000:.2f} ms")
+            continue
+        
         times.append(elapsed)
         
-        if i % 10 == 0:
+        if (i - 1) % 10 == 0:
             print(f"Frame {i}: {elapsed*1000:.2f} ms, Mean depth: {stats.get('mean', 0):.1f} mm")
     
     return times
