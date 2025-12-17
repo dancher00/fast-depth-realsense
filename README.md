@@ -94,7 +94,7 @@ Expected speedup:
 - ✅ GPU acceleration with CuPy
 - ✅ Parallelization
 
-## Robotics Use Cases
+## Use Cases
 
 Processed data can be used for:
 - Navigation and SLAM
