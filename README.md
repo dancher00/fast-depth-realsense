@@ -2,6 +2,8 @@
 
 Final project for the "High-Performance Python" course.
 
+![Description of image](assets/side_by_side.png)
+
 ## Project Overview
 
 This project demonstrates optimization of depth data processing from Intel RealSense camera for robotics applications. Core tasks:
